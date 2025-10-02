@@ -1,6 +1,7 @@
 # Compiler and flags
 CC      = gcc
 CFLAGS  = -Wall -Wextra -O0 -g
+LDFLAGS = -static
 
 # Targets
 TARGET  = set-leds
@@ -12,7 +13,7 @@ all: $(TARGET)
 
 # Link the program
 $(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
 # Compile source files into objects
 %.o: %.c
