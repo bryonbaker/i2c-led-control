@@ -15,14 +15,110 @@
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #endif
 
+void print_i2c_smbus_data(const union i2c_smbus_data *data) {
+    printf("i2c_smbus_data:\n");
+    if (!data) {
+        printf("i2c_smbus_data: (null pointer)\n");
+        return;
+    }
+
+    /* Print as single byte */
+    printf("byte: 0x%02x (%u)\n", data->byte, data->byte);
+
+    /* Print as 16-bit word */
+    printf("word: 0x%04x (%u)\n", data->word, data->word);
+
+    /* Print block contents */
+    __u8 len = data->block[0];
+    if (len > I2C_SMBUS_BLOCK_MAX) {
+        len = I2C_SMBUS_BLOCK_MAX; /* clamp to avoid overflow */
+    }
+    printf("block length: %u\n", len);
+    printf("block data: ");
+    for (__u8 i = 1; i <= len; i++) {
+        printf("0x%02x ", data->block[i]);
+    }
+    printf("\n");
+}
+
+void print_i2c_smbus_ioctl_data(const struct i2c_smbus_ioctl_data *ioctl_data) {
+    printf("i2c_smbus_ioctl_data:\n");
+    if (!ioctl_data) {
+        printf("i2c_smbus_ioctl_data: (null pointer)\n");
+        return;
+    }
+
+    /* Read/write direction */
+    const char *rw = (ioctl_data->read_write == I2C_SMBUS_READ) ? "READ" :
+                     (ioctl_data->read_write == I2C_SMBUS_WRITE) ? "WRITE" : "UNKNOWN";
+    printf("read_write: %s (%u)\n", rw, ioctl_data->read_write);
+
+    /* Command byte */
+    printf("command: 0x%02x (%u)\n", ioctl_data->command, ioctl_data->command);
+
+    /* Size / transaction type */
+    printf("size (transaction type): ");
+    switch (ioctl_data->size) {
+        case I2C_SMBUS_QUICK:       printf("I2C_SMBUS_QUICK\n"); break;
+        case I2C_SMBUS_BYTE:        printf("I2C_SMBUS_BYTE\n"); break;
+        case I2C_SMBUS_BYTE_DATA:   printf("I2C_SMBUS_BYTE_DATA\n"); break;
+        case I2C_SMBUS_WORD_DATA:   printf("I2C_SMBUS_WORD_DATA\n"); break;
+        case I2C_SMBUS_PROC_CALL:   printf("I2C_SMBUS_PROC_CALL\n"); break;
+        case I2C_SMBUS_BLOCK_DATA:  printf("I2C_SMBUS_BLOCK_DATA\n"); break;
+        case I2C_SMBUS_I2C_BLOCK_DATA: printf("I2C_SMBUS_I2C_BLOCK_DATA\n"); break;
+        default: printf("UNKNOWN (%u)\n", ioctl_data->size); break;
+    }
+
+    /* Data payload */
+    if (ioctl_data->data) {
+        printf("data:\n");
+        print_i2c_smbus_data(ioctl_data->data);
+    } else {
+        printf("data: (null)\n");
+    }
+    printf("===============================\n");
+}
+
 static int set_addr(int fd, int addr) {
+    // Debug: Log parameters
+    printf("DEBUG: set_addr() called with fd=%d, addr=0x%02X\n", fd, addr);
+    
     if (ioctl(fd, I2C_SLAVE, addr) < 0) {
         return -1;
     }
     return 0;
 }
 
+static int write_byte( int fd, int addr, unsigned char data ) {
+    // Debug: Log parameters
+    printf("DEBUG: write_byte() called with fd=%d, addr=0x%02X, data=0x%02X\n", fd, addr, data);
+    
+    if (set_addr(fd, addr) < 0) {
+        return -1;
+    }
+    // Prepare SMBus ioctl payload
+    union i2c_smbus_data smbus_data;
+    smbus_data.byte = data;
+    struct i2c_smbus_ioctl_data args = {
+        .read_write = I2C_SMBUS_WRITE,
+        .command = 0x01,
+        .size = I2C_SMBUS_BYTE_DATA,
+        .data = &smbus_data,
+    };
+
+    print_i2c_smbus_ioctl_data(&args);
+
+
+    if (ioctl(fd, I2C_SMBUS, &args) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static int write_word( int fd, int addr, unsigned int data ) {
+    // Debug: Log parameters
+    printf("DEBUG: write_word() called with fd=%d, addr=0x%02X, data=0x%04X\n", fd, addr, data);
+    
     if (set_addr(fd, addr) < 0) {
         return -1;
     }
@@ -35,6 +131,9 @@ static int write_word( int fd, int addr, unsigned int data ) {
         .size = I2C_SMBUS_WORD_DATA,
         .data = &smbus_data,
     };
+
+    print_i2c_smbus_ioctl_data(&args);
+
     if (ioctl(fd, I2C_SMBUS, &args) < 0) {
         return -1;
     }
@@ -146,6 +245,28 @@ static unsigned int led_addr_for_index(int n) {
     return 0x0081u + (unsigned int)n * 0x0300u;
 }
 
+// On hardware reboot the LEDs are in "breathing mode". This mode is controlled by the hardware 
+// so we need to set the leds into direct control mode in order to control the colours manually.
+int set_led_direct_control(int fd, unsigned char bank_addr, unsigned int control_code) {
+    // Debug: Log all parameters
+    printf("DEBUG: set_led_direct_control() called with fd=%d, bank_addr=0x%02X, control_code=0x%04X\n", 
+           fd, bank_addr, control_code);
+    
+    // Select the 0x2080 register (LED mode control)
+    if( write_word(fd, bank_addr, control_code) < 0) {
+        perror("write_word(0x2080)");
+        return -1;
+    }
+    // Now write a byte 0x01 to set direct control mode
+    if( write_byte(fd, bank_addr, 0x01) < 0) {
+        perror("write_byte(0x01)");
+        return -1;
+    }
+
+    return 0;
+}
+
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "Usage: %s {red|blue|black}\n", argv[0]);
@@ -225,8 +346,13 @@ int main(int argc, char **argv) {
         printf("Bank 0x%02x present; setting 8 LEDs to %s (R=%u B=%u G=%u)\n",
                bank_addr, argv[1], r, b, g);
 
+        // Ensure direct control mode (required before writing LED colours)
+        set_led_direct_control(fd, bank_addr, 0x2080);
+        set_led_direct_control(fd, bank_addr, 0xA080);
+
         // For each of the eight LEDs, address via 10-bit LED address and write RBG block
         for (int n = 0; n < 8; ++n) {
+
             unsigned int led = led_addr_for_index(n);
             if (write_led_colour(fd, bank_addr, led, r, b, g) == 0) {
                 printf("  LED%u @ 0x%03X set.\n", (unsigned)(n+1), led);
